@@ -24,5 +24,25 @@ def build_dataset(dataset_opt):
             type (str): Dataset type.
     """
     dataset_opt = deepcopy(dataset_opt)
+    if dataset_opt['type'] == 'custom_pixels':
+        from hydra.utils import instantiate
+        base_ds = instantiate(dataset_opt["hydra_dataset"])
+        max_samples = dataset_opt.get("max_samples", None)
+        if max_samples is not None:
+            import numpy as np
+            from torch.utils.data import Subset
+            max_samples = int(max_samples)
+            subset_seed = int(dataset_opt.get("subset_seed", 12345))  # same across ranks
+            rng = np.random.default_rng(subset_seed)
+            idx = rng.choice(len(base_ds), size=min(max_samples, len(base_ds)), replace=False)
+            base_ds = Subset(base_ds, idx.tolist())
+
+        from .custom_adapter import CustomSequenceAdapter
+        ds = CustomSequenceAdapter(
+            base_dataset=base_ds,
+            context_frames=dataset_opt.get('context_frames'),
+            predict_frames=dataset_opt.get('predict_frames'),
+        )
+        return ds
     dataset = DATASET_REGISTRY.get(dataset_opt['type'])(dataset_opt)
     return dataset

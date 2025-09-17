@@ -1,0 +1,41 @@
+# far/data/custom_adapter.py
+from typing import Any, Dict
+import torch
+from torch.utils.data import Dataset
+
+class CustomSequenceAdapter(Dataset):
+    """
+    Wrap a base dataset that yields (context, target) sequences.
+    Assumptions (by request):
+      - context: (N, C, H, W) float in [0,1]
+      - target : (M, C, H, W) float in [0,1]
+      - sizes are already correct; no transforms here.
+
+    Returns dict:
+      {"video": (T, C, H, W), "path": str(idx)}
+    where T = N + M
+    """
+    def __init__(self, base_dataset: Dataset, context_frames: int, predict_frames: int):
+        self.base = base_dataset
+        self.N = int(context_frames)
+        self.M = int(predict_frames)
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        item = self.base[idx]
+        #ts = self.base.timestamps[idx]
+        if isinstance(item, dict):
+            ctx, tgt = item["context"], item["target"]
+        else:
+            ctx, tgt = item  # expect a 2-tuple
+
+        # minimal, no checks (assume shapes/dtypes/ranges are correct)
+        video = torch.cat([ctx, tgt], dim=0)  # (T, C, H, W)
+        
+        return {
+            "video": video,
+            "path": str(idx),
+            "index": torch.tensor(idx, dtype=torch.long),
+        }
