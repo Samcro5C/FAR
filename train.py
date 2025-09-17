@@ -15,6 +15,8 @@ from far.data import build_dataset
 from far.trainers import build_trainer
 from far.utils.logger_util import MessageLogger, dict2str, reduce_loss_dict, set_path_logger, setup_wandb
 
+OmegaConf.register_new_resolver("torch_dtype", lambda x: getattr(torch, x))
+
 
 def train(args):
 
@@ -56,7 +58,7 @@ def train(args):
     trainset_cfg = opt['datasets']['train']
     train_dataset = build_dataset(trainset_cfg)
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=trainset_cfg['batch_size_per_gpu'], shuffle=True, drop_last=True, num_workers=8, pin_memory=True)
+        train_dataset, batch_size=trainset_cfg['batch_size_per_gpu'], shuffle=True, drop_last=True, num_workers=32, pin_memory=True)
 
     if opt['datasets'].get('sample'):
         sampleset_cfg = opt['datasets']['sample']

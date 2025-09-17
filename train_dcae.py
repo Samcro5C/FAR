@@ -15,6 +15,8 @@ from far.data import build_dataset
 from far.trainers import build_trainer
 from far.utils.logger_util import MessageLogger, dict2str, reduce_loss_dict, set_path_logger, setup_wandb
 
+OmegaConf.register_new_resolver("torch_dtype", lambda x: getattr(torch, x))
+
 
 def train(args):
 
