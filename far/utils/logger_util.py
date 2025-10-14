@@ -58,15 +58,16 @@ def copy_opt_file(opt_file, experiments_root):
 
 def set_path_logger(accelerator, config_path, opt, is_train=True):
     opt['is_train'] = is_train
+    out_path = opt['path'].get('out_dir', '.')
 
     if is_train:
-        experiments_root = osp.join('experiments', opt['name'])
+        experiments_root = osp.join(out_path, 'experiments', opt['name'])
         opt['path']['experiments_root'] = experiments_root
         opt['path']['models'] = osp.join(experiments_root, 'models')
         opt['path']['log'] = experiments_root
         opt['path']['visualization'] = osp.join(experiments_root, 'visualization')
     else:
-        results_root = osp.join('results', opt['name'])
+        results_root = osp.join(out_path, 'results', opt['name'])
         opt['path']['results_root'] = results_root
         opt['path']['log'] = results_root
         opt['path']['visualization'] = osp.join(results_root, 'visualization')
