@@ -235,7 +235,7 @@ class FARTrainer:
         return {'total_loss': loss}
 
     @torch.no_grad()
-    def sample(self, val_dataloader, opt, wandb_logger=None, global_step=0):
+    def sample(self, val_dataloader, opt, wandb_logger=None, global_step=0, on_batch=None):
         model = self.accelerator.unwrap_model(self.model)
 
         if self.ema is not None:
@@ -283,10 +283,19 @@ class FARTrainer:
                 'use_kv_cache': opt['val']['sample_cfg'].get('use_kv_cache', True)
             }
 
-            pred_video = val_pipeline.generate(**input_params)
+            pred_video, pred_latents = val_pipeline.generate(**input_params)
 
             pred_video = rearrange(pred_video, '(b n) f c h w -> b n f c h w', n=num_trajectory)
+            pred_latents = rearrange(pred_latents, '(b n) f c h w -> b n f c h w', n=num_trajectory)
             gt_video = rearrange(gt_video, '(b n) f c h w -> b n f c h w', n=num_trajectory)
+
+            if on_batch is not None:
+                context_len = opt['val']['sample_cfg']['context_length']
+                unroll_len  = opt['val']['sample_cfg']['unroll_length']
+                pred_forecasted = pred_video[:, :, context_len:context_len + unroll_len].contiguous()
+                latents_forecasted = pred_latents[:, :, context_len:context_len + unroll_len].contiguous()
+                idx = batch['index'].detach().cpu() if torch.is_tensor(batch['index']) else batch['index']
+                on_batch(pred_forecasted.detach().cpu(), latents_forecasted.detach().cpu(), idx)
 
             log_paired_video(
                 sample=pred_video,

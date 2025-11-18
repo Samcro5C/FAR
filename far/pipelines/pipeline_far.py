@@ -124,7 +124,8 @@ class FARPipeline(DiffusionPipeline):
                 latents = torch.cat([latents, pred_latents], dim=1)
 
         samples = self.vae_decode(latents)
-        return samples
+        return samples, latents
+
 
     @torch.no_grad()
     def __call__(
