@@ -25,7 +25,7 @@ class CustomSequenceAdapter(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         item = self.base[idx]
-        #ts = self.base.timestamps[idx]
+        ts = self.base.timestamps[idx]
         if isinstance(item, dict):
             ctx, tgt = item["context"], item["target"]
         else:
@@ -37,5 +37,5 @@ class CustomSequenceAdapter(Dataset):
         return {
             "video": video,
             "path": str(idx),
-            "index": torch.tensor(idx, dtype=torch.long),
+            "index": torch.tensor(ts.value, dtype=torch.long),
         }

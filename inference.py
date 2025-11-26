@@ -6,7 +6,7 @@ from typing import Optional, Tuple, Dict, Any, List
 
 import torch
 import gc
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from omegaconf import OmegaConf
@@ -79,7 +79,13 @@ def main():
     opt = OmegaConf.to_container(OmegaConf.load(args.opt), resolve=True)
 
     # Accelerator
-    accelerator = Accelerator(mixed_precision=opt.get("mixed_precision"))
+    accelerator = Accelerator(
+        mixed_precision=opt.get("mixed_precision"),
+        dataloader_config=DataLoaderConfiguration(
+            split_batches=False,
+            even_batches=False
+            )
+    )
     logger = get_logger("far", log_level="INFO")
 
     # Prepare experiment directories/loggers (no wandb)
@@ -113,63 +119,48 @@ def main():
     # set ema after prepare everything: sync the model init weight in ema
     train_pipeline.set_ema_model(ema_decay=opt['train'].get('ema_decay'))
     if opt['path']['pretrain_network']:
-        global_step = resume_checkpoint(args, accelerator, os.path.join(opt['path']['pretrain_network'], 'models'), train_pipeline)
+        global_step = resume_checkpoint(accelerator, os.path.join(opt['path']['pretrain_network'], 'models'), train_pipeline)
     else:
         logger.info('infer only pretrained model without load checkpoint!')
         global_step = 0
 
-    for date in dates:
-        from datetime import datetime
-        # if date <= datetime(2019, 10, 20).date():
-        #     continue
-        date_mask = sample_timestamps.date == date
-        idx_date = date_mask.nonzero()[0]
-        ts_date = sample_timestamps[date_mask]
-        ds_date = torch.utils.data.Subset(sample_dataset, idx_date)
-        dl_date = dataloader = torch.utils.data.DataLoader(
-            ds_date,
-            batch_size=sampleset_cfg["batch_size_per_gpu"],
-            shuffle=False,
-            persistent_workers=False,
-            num_workers=sampleset_cfg.get("num_worker_per_gpu", 4),
-            pin_memory=False,
-            timeout=120,
-        )
+    dl = torch.utils.data.DataLoader(
+        sample_dataset,
+        batch_size=sampleset_cfg["batch_size_per_gpu"],
+        shuffle=False,
+        persistent_workers=False,
+        num_workers=sampleset_cfg.get("num_worker_per_gpu", 4),
+        pin_memory=False,
+        timeout=120,
+    )
 
-        # Prepare with accelerator
-        sample_dataloader = accelerator.prepare(dl_date)
+    # Prepare with accelerator
+    sample_dataloader = accelerator.prepare(dl)
 
-        preds_list, preds_latents, indices = [], [], []
-        def collector(pred_b, latent_b, idx_b):
-            preds_latents.append(latent_b)
-            preds_list.append(pred_b)                 # pred_b is CPU, detached
-            indices.append(torch.as_tensor(idx_b))    # keep CPU
+    rank = accelerator.process_index
+    out_root = Path(opt.get("eval_dir", "./eval_dir"))
+    out_latents = out_root / 'latents'
+    out_latents.mkdir(parents=True, exist_ok=True)
+    zarr_path = out_root / f"tmp_asi_preds{rank}.zarr"
+    zarr_path_latents = out_latents / f"tmp_latent_preds{rank}.zarr"
 
-        # Test!
-        logger.info('***** Running testing *****')
+    time_encoding = {
+        "units": "seconds since 1970-01-01T00:00:00",
+        "dtype": "int64",
+        "calendar": "standard",
+    }
+    encoding = {"time": time_encoding}
 
-        logger.info(f'begin evaluation step-{global_step}:')
+    def collector(pred_b, latent_b, idx_b):
+        pred_b_np = (pred_b * 255).to(torch.uint8).numpy()
+        latent_b_np = latent_b.to(torch.float32).numpy()
+        idx_b_np = idx_b.numpy().astype('datetime64[ns]')
 
-        with torch.inference_mode():
-            train_pipeline.sample(sample_dataloader, opt, wandb_logger=None, global_step=global_step, on_batch=collector)
-
-        accelerator.wait_for_everyone()
-
-        preds   = torch.cat(preds_list, dim=0)   # (N_total, Ntraj, F, C, H, W)
-        latents = torch.cat(preds_latents, dim=0)
-        indices = torch.cat(indices, dim=0) # (N_total,)
-
-        order = torch.argsort(indices)
-        preds   = preds[order]
-        latents = latents[order]
-        indices = indices[order]
-
-        # Build xarray DataArray
         da = xr.DataArray(
-            preds.to(torch.float32).numpy(),
+            pred_b_np,
             dims=("time", "sample", "lead_time", "c", "x", "y"),
             coords={
-                "time": ts_date.values,
+                "time": idx_b_np,
                 "lead_time": sample_lead_times,
             },
             name="asi_preds",
@@ -178,12 +169,11 @@ def main():
                 "dtype": "float32",
             },
         )
-
         da_latents = xr.DataArray(
-            latents.to(torch.float32).numpy(),
+            latent_b_np,
             dims=("time", "sample", "lead_time", "c", "x", "y"),
             coords={
-                "time": ts_date.values,
+                "time": idx_b_np,
                 "lead_time": sample_lead_times,
             },
             name="asi_latents",
@@ -192,22 +182,33 @@ def main():
                 "dtype": "float32",
             },
         )
+        chunk_sizes = {
+            "time": 2,
+            "sample": -1,
+            "lead_time": -1,
+            "c": -1,
+            "x": -1,
+            "y": -1,
+        }
+        da = da.chunk(chunk_sizes)
+        da_latents = da_latents.chunk(chunk_sizes)
+        if zarr_path.exists():
+            da.to_zarr(zarr_path, mode="a", append_dim="time")
+        else:
+            da.to_zarr(zarr_path, mode="w", encoding=encoding)
+        if zarr_path_latents.exists():
+            da_latents.to_zarr(zarr_path_latents, mode="a", append_dim="time")
+        else:
+            da_latents.to_zarr(zarr_path_latents, mode="w", encoding=encoding)
 
-        out_path = Path(opt.get('eval_dir', './eval_dir')) / date.strftime("%Y%m%d.nc")
-        out_path_latents = Path(opt.get('eval_dir', './eval_dir')) / date.strftime("latents_%Y%m%d.nc")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        da.to_netcdf(out_path, engine="netcdf4")
-        da_latents.to_netcdf(out_path_latents, engine="netcdf4")
+    # Test!
+    logger.info('***** Running testing *****')
+    logger.info(f'begin evaluation step-{global_step}:')
 
-        accelerator.print(f"Saved predictions to: {out_path.resolve()}")
-
-        del sample_dataloader, dl_date, ds_date, da, preds, preds_list, indices
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        
+    with torch.inference_mode():
+        train_pipeline.sample(sample_dataloader, opt, wandb_logger=None, global_step=global_step, on_batch=collector)
+    
     accelerator.wait_for_everyone()
 
 
