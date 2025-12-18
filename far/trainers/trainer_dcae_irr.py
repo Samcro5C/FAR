@@ -243,6 +243,13 @@ class DCAEIrrTrainer:
 
         model.eval()
 
+        # --- accumulators for dataset-level irradiance metrics ---
+        sum_abs_err = torch.tensor(0.0, device=self.accelerator.device)
+        sum_sq_err  = torch.tensor(0.0, device=self.accelerator.device)
+        sum_bias_err= torch.tensor(0.0, device=self.accelerator.device)
+        numel_total = torch.tensor(0.0, device=self.accelerator.device)
+
+
         for batch_idx, item in enumerate(tqdm(val_dataloader)):
 
             gt_video = 2 * item['video'] - 1
@@ -276,30 +283,49 @@ class DCAEIrrTrainer:
             )
 
             # --- irradiance logging (optional) ---
-            # irr_pred_flat: (B*T, 1) -> (B, T)
-            irr_pred = irr_pred_flat.squeeze(-1)
-            irr_pred = rearrange(irr_pred, '(b t) -> b t', b=item['video'].shape[0])
-
             if 'irradiance' in item:
+                # pred: (B*T, 1) -> (B, T)
+                irr_pred = irr_pred_flat.squeeze(-1)
+                irr_pred = rearrange(irr_pred, '(b t) -> b t', b=item['video'].shape[0])
+
                 irr_gt = item['irradiance'].to(device=irr_pred.device, dtype=irr_pred.dtype)
-                # allow (B,T,1) or (B,T) or (B,)
+
+                # Normalize GT shape to (B, T)
                 if irr_gt.dim() == 3 and irr_gt.size(-1) == 1:
-                    irr_gt = irr_gt.squeeze(-1)
+                    irr_gt = irr_gt.squeeze(-1)          # (B, T)
                 if irr_gt.dim() == 1:
-                    # (B,) -> broadcast over T for comparison
+                    # Per-clip irradiance -> broadcast across T explicitly
                     irr_gt = irr_gt[:, None].expand_as(irr_pred)
 
-                irr_mae = torch.mean(torch.abs(irr_pred - irr_gt))
-                irr_rmse = torch.sqrt(torch.mean((irr_pred - irr_gt) ** 2))
-                irr_mbe = torch.mean(irr_pred - irr_gt)
+                # Hard fail if shapes don't match (prevents silent broadcasting bugs)
+                if irr_gt.shape != irr_pred.shape:
+                    raise ValueError(f"Irradiance shape mismatch: gt={irr_gt.shape}, pred={irr_pred.shape}")
 
-                if wandb_logger is not None:
-                    wandb_logger.log({
+                diff = irr_pred - irr_gt  # (B, T)
+
+                # Distributed-safe: gather across processes before accumulating
+                diff_all = self.accelerator.gather(diff.detach())
+
+                sum_abs_err += diff_all.abs().sum()
+                sum_sq_err  += (diff_all ** 2).sum()
+                sum_bias_err+= diff_all.sum()
+                numel_total += diff_all.numel()
+
+        # --- compute dataset-level metrics once ---
+        if numel_total.item() > 0:
+            irr_mae  = sum_abs_err / numel_total
+            irr_rmse = torch.sqrt(sum_sq_err / numel_total)
+            irr_mbe = sum_bias_err / numel_total
+
+            if wandb_logger is not None and self.accelerator.is_main_process:
+                wandb_logger.log(
+                    {
                         'eval/irr_mae': irr_mae.item(),
                         'eval/irr_rmse': irr_rmse.item(),
                         'eval/irr_mbe': irr_mbe.item(),
-                    }, step=global_step)
-
+                    },
+                    step=global_step
+                )
         if self.ema is not None:
             self.ema.restore(model)
 
