@@ -707,3 +707,69 @@ class MyAutoencoderDC(ModelMixin, ConfigMixin):
         if not return_dict:
             return (decoded, )
         return DecoderOutput(sample=decoded)
+
+
+class DCAEWithIrradiance(MyAutoencoderDC):
+    """
+    Extension of DCAE that also predicts irradiance from the latent representation.
+    """
+
+    def __init__(
+        self,
+        *args,
+        irradiance_hidden_dim: int = 128,
+        **kwargs,
+    ) -> None:
+        """
+        All DCAE args/kwargs are passed through to the base class.
+
+        Args:
+            irradiance_hidden_dim (`int`, defaults to 128):
+                Hidden dimension of the MLP head used to predict irradiance.
+        """
+        super().__init__(*args, **kwargs)
+
+        # Simple head: global average pool over spatial dims -> MLP -> scalar irradiance
+        self.irradiance_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),   # (B, C, H', W') -> (B, C, 1, 1)
+            nn.Flatten(start_dim=1),        # (B, C, 1, 1) -> (B, C)
+            nn.Linear(self.config.latent_channels, irradiance_hidden_dim),
+            nn.SiLU(),
+            nn.Linear(irradiance_hidden_dim, 1),  # scalar irradiance
+        )
+
+    def forward(
+        self,
+        sample: torch.Tensor,
+        return_dict: bool = True,
+    ):
+        """
+        Args:
+            sample (`torch.Tensor`): input images, shape (B, C, H, W)
+            return_dict (`bool`, defaults to True): if False, returns (decoded, irradiance)
+
+        Returns:
+            If return_dict:
+                {
+                    "sample": decoded_images,      # (B, C, H, W)
+                    "irradiance": irradiance_pred  # (B, 1)
+                }
+            else:
+                (decoded_images, irradiance_pred)
+        """
+        # Encode / decode using the original DCAE
+        latents = self.encode(sample, return_dict=False)      # (B, latent_channels, H', W')
+        decoded = self.decode(latents, return_dict=False)     # (B, C, H, W)
+
+        # Predict irradiance from latent
+        irradiance = self.irradiance_head(latents)            # (B, 1)
+
+        if not return_dict:
+            return decoded, irradiance
+
+        # Mirror DecoderOutput style but extended with irradiance
+        # return {
+        #     "sample": decoded,
+        #     "irradiance": irradiance,
+        # }
+        return DecoderOutput(sample=decoded, irradiance=irradiance)
