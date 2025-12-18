@@ -36,6 +36,7 @@ def build_dataset(dataset_opt):
             rng = np.random.default_rng(subset_seed)
             idx = rng.choice(len(base_ds), size=min(max_samples, len(base_ds)), replace=False)
             base_ds = Subset(base_ds, idx.tolist())
+            base_ds.timestamps = base_ds.dataset.timestamps[base_ds.indices]
 
         from .custom_adapter import CustomSequenceAdapter
         ds = CustomSequenceAdapter(
