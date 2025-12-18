@@ -708,7 +708,7 @@ class MyAutoencoderDC(ModelMixin, ConfigMixin):
             return (decoded, )
         return DecoderOutput(sample=decoded)
 
-
+@MODEL_REGISTRY.register()
 class DCAEWithIrradiance(MyAutoencoderDC):
     """
     Extension of DCAE that also predicts irradiance from the latent representation.
@@ -758,8 +758,8 @@ class DCAEWithIrradiance(MyAutoencoderDC):
                 (decoded_images, irradiance_pred)
         """
         # Encode / decode using the original DCAE
-        latents = self.encode(sample, return_dict=False)      # (B, latent_channels, H', W')
-        decoded = self.decode(latents, return_dict=False)     # (B, C, H, W)
+        latents = self.encode(sample, return_dict=False)[0]      # (B, latent_channels, H', W')
+        decoded = self.decode(latents, return_dict=False)[0]     # (B, C, H, W)
 
         # Predict irradiance from latent
         irradiance = self.irradiance_head(latents)            # (B, 1)

@@ -33,10 +33,11 @@ class DCAEIrrTrainer:
         accelerator,
         model_cfg,
         perceptual_weight=1.0,
+        irradiance_weight=0.1,
         disc_weight=0,
         disc_start_iter=50001
     ):
-        super(DCAETrainer, self).__init__()
+        super(DCAEIrrTrainer, self).__init__()
 
         self.accelerator = accelerator
         weight_dtype = torch.float32
@@ -60,6 +61,7 @@ class DCAEIrrTrainer:
         self.ema = None
 
         self.perceptual_weight = perceptual_weight
+        self.irradiance_weight = irradiance_weight
         self.disc_weight = disc_weight
         self.disc_start_iter = disc_start_iter
 
@@ -109,20 +111,43 @@ class DCAEIrrTrainer:
         inputs = batch['video'].to(dtype=self.weight_dtype)
         inputs = inputs * 2 - 1
 
+        # Prepare irradiance target aligned with flattened frames
+        irr = batch['irradiance'].to(device=inputs.device, dtype=inputs.dtype)
+        # irr expected shape: (B, T) or (B, T, 1) or (B,)
+        if irr.dim() == 3 and irr.size(-1) == 1:
+            irr = irr.squeeze(-1)  # (B, T)
         if inputs.dim() == 5:  # video
+            b, t = inputs.shape[0], inputs.shape[1]
             inputs = rearrange(inputs, 'b t c h w -> (b t) c h w')
+            if irr.dim() == 2:          # (B, T)
+                irr = rearrange(irr, 'b t -> (b t)')      # (B*T,)
+            else:
+                raise ValueError(f"Unexpected irradiance shape for video: {irr.shape}")
+        else:
+            # single image batch; irr should be (B,) or (B,1)
+            if irr.dim() == 2 and irr.size(-1) == 1:
+                irr = irr.squeeze(-1)
+            if irr.dim() != 1:
+                raise ValueError(f"Unexpected irradiance shape for images: {irr.shape}")
 
-        reconstructions = self.model(inputs, return_dict=False)[0]
+        # Forward: DCAEWithIrradiance returns (recon, irr_pred)
+        reconstructions, irr_pred = self.model(inputs, return_dict=False)
 
         # reconstruction loss
         rec_loss = F.l1_loss(inputs, reconstructions)
         loss_dict['rec_loss'] = rec_loss
 
+        perceptual_loss = torch.tensor(0.0, device=inputs.device)
         if self.perceptual_weight > 0:
             perceptual_loss = self.perceptual_weight * self.perceptual_loss(inputs, reconstructions)
             loss_dict['perceptual_loss'] = perceptual_loss
 
-        total_loss = rec_loss + perceptual_loss
+        # irradiance loss (use L1 as a robust default)
+        irr_pred = irr_pred.squeeze(-1)          # (B*T,)
+        irr_loss = F.l1_loss(irr_pred, irr) * self.irradiance_weight
+        loss_dict['irr_loss'] = irr_loss
+
+        total_loss = rec_loss + perceptual_loss + irr_loss
         loss_dict['total_loss'] = total_loss
 
         return loss_dict
@@ -141,28 +166,52 @@ class DCAEIrrTrainer:
         inputs = batch['video'].to(dtype=self.weight_dtype)
         inputs = inputs * 2 - 1
 
-        if inputs.dim() == 5:  # video
-            inputs = rearrange(inputs, 'b t c h w -> (b t) c h w')
+        irr = batch['irradiance'].to(device=inputs.device, dtype=inputs.dtype)
+        if irr.dim() == 3 and irr.size(-1) == 1:
+            irr = irr.squeeze(-1)
 
-        reconstructions, irradiance = self.model(inputs, return_dict=False)
+        if inputs.dim() == 5:
+            b, t = inputs.shape[0], inputs.shape[1]
+            inputs = rearrange(inputs, 'b t c h w -> (b t) c h w')
+            if irr.dim() == 2:
+                irr = rearrange(irr, 'b t -> (b t)')
+            elif irr.dim() == 1 and irr.numel() == b:
+                irr = irr.repeat_interleave(t)
+            else:
+                raise ValueError(f"Unexpected irradiance shape for video: {irr.shape}")
+        else:
+            if irr.dim() == 2 and irr.size(-1) == 1:
+                irr = irr.squeeze(-1)
+            if irr.dim() != 1:
+                raise ValueError(f"Unexpected irradiance shape for images: {irr.shape}")
+
+        reconstructions, irr_pred = self.model(inputs, return_dict=False)
 
         # reconstruction loss
         rec_loss = F.l1_loss(inputs, reconstructions)
         loss_dict['rec_loss'] = rec_loss
 
+        perceptual_loss = torch.tensor(0.0, device=inputs.device)
         if self.perceptual_weight > 0:
             perceptual_loss = self.perceptual_weight * self.perceptual_loss(inputs, reconstructions)
             loss_dict['perceptual_loss'] = perceptual_loss
 
-        # generator loss
+        # irradiance loss
+        irr_pred = irr_pred.squeeze(-1)
+        irr_loss = F.l1_loss(irr_pred, irr) * self.irradiance_weight
+        loss_dict['irr_loss'] = irr_loss
+
+        # generator GAN loss
         logits_fake = self.discriminator(reconstructions)
         g_loss = -torch.mean(logits_fake)
         d_weight = self.disc_weight * calculate_adaptive_weight(
-            rec_loss + perceptual_loss, g_loss, last_layer=self.accelerator.unwrap_model(self.model).get_last_layer())
+            rec_loss + perceptual_loss, g_loss,
+            last_layer=self.accelerator.unwrap_model(self.model).get_last_layer()
+        )
         g_loss = d_weight * g_loss
         loss_dict['g_loss'] = g_loss
 
-        total_loss_g = rec_loss + perceptual_loss + g_loss
+        total_loss_g = rec_loss + perceptual_loss + irr_loss + g_loss
         loss_dict['total_loss_g'] = total_loss_g
 
         # train discriminator
@@ -199,17 +248,23 @@ class DCAEIrrTrainer:
             gt_video = 2 * item['video'] - 1
             gt_video = rearrange(gt_video, 'b t c h w -> (b t) c h w')
 
-            recon_video = model(gt_video, return_dict=False)[0]
-            recon_video = rearrange(recon_video, '(b t) c h w -> b 1 t c h w', b=item['video'].shape[0])
+            # Model now returns (recon, irradiance_pred) when return_dict=False
+            recon_flat, irr_pred_flat = model(gt_video, return_dict=False)
+
+            # --- video reconstruction logging (unchanged behavior) ---
+            recon_video = rearrange(
+                recon_flat, '(b t) c h w -> b 1 t c h w', b=item['video'].shape[0]
+            )
             recon_video = (recon_video + 1) / 2
 
-            gt_video = rearrange(gt_video, '(b t) c h w -> b 1 t c h w', b=item['video'].shape[0])
-            gt_video = (gt_video + 1) / 2
+            gt_video_vis = rearrange(
+                gt_video, '(b t) c h w -> b 1 t c h w', b=item['video'].shape[0]
+            )
+            gt_video_vis = (gt_video_vis + 1) / 2
 
-            # step 1: log generation video
             log_paired_video(
                 sample=recon_video,
-                gt=gt_video,
+                gt=gt_video_vis,
                 context_frames=opt['val']['sample_cfg']['context_length'],
                 save_suffix=item['index'],
                 save_dir=os.path.join(opt['path']['visualization'], f'iter_{global_step}'),
@@ -217,7 +272,33 @@ class DCAEIrrTrainer:
                 wandb_cfg={
                     'namespace': 'eval_vis',
                     'step': global_step,
-                })
+                }
+            )
+
+            # --- irradiance logging (optional) ---
+            # irr_pred_flat: (B*T, 1) -> (B, T)
+            irr_pred = irr_pred_flat.squeeze(-1)
+            irr_pred = rearrange(irr_pred, '(b t) -> b t', b=item['video'].shape[0])
+
+            if 'irradiance' in item:
+                irr_gt = item['irradiance'].to(device=irr_pred.device, dtype=irr_pred.dtype)
+                # allow (B,T,1) or (B,T) or (B,)
+                if irr_gt.dim() == 3 and irr_gt.size(-1) == 1:
+                    irr_gt = irr_gt.squeeze(-1)
+                if irr_gt.dim() == 1:
+                    # (B,) -> broadcast over T for comparison
+                    irr_gt = irr_gt[:, None].expand_as(irr_pred)
+
+                irr_mae = torch.mean(torch.abs(irr_pred - irr_gt))
+                irr_rmse = torch.sqrt(torch.mean((irr_pred - irr_gt) ** 2))
+                irr_mbe = torch.mean(irr_pred - irr_gt)
+
+                if wandb_logger is not None:
+                    wandb_logger.log({
+                        'eval/irr_mae': irr_mae.item(),
+                        'eval/irr_rmse': irr_rmse.item(),
+                        'eval/irr_mbe': irr_mbe.item(),
+                    }, step=global_step)
 
         if self.ema is not None:
             self.ema.restore(model)

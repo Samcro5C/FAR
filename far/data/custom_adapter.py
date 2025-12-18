@@ -30,12 +30,20 @@ class CustomSequenceAdapter(Dataset):
             ctx, tgt = item["context"], item["target"]
         else:
             ctx, tgt = item  # expect a 2-tuple
-
-        # minimal, no checks (assume shapes/dtypes/ranges are correct)
-        video = torch.cat([ctx, tgt], dim=0)  # (T, C, H, W)
+        if isinstance(ctx, tuple):
+            ctx_vid, ctx_irr = ctx[0], ctx[1]
+        else:
+            ctx_vid, ctx_irr = ctx, torch.empty(size=ctx.shape[0])
+        if isinstance(tgt, tuple):
+            tgt_vid, tgt_irr = tgt[0], tgt[1]
+        else:
+            tgt_vid, tgt_irr = tgt, torch.empty(size=tgt.shape[0])
+        video = torch.cat([ctx_vid, tgt_vid], dim=0)  # (T, C, H, W)
+        irr = torch.cat([ctx_irr, tgt_irr], dim=0)
         
         return {
             "video": video,
+            "irradiance": irr,
             "path": str(idx),
             "index": torch.tensor(ts.value, dtype=torch.long),
         }
