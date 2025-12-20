@@ -716,9 +716,23 @@ class DCAEWithIrradiance(MyAutoencoderDC):
 
     def __init__(
         self,
-        *args,
+        in_channels: int = 3,
+        latent_channels: int = 32,
+        attention_head_dim: int = 32,
+        encoder_block_types: Union[str, Tuple[str]] = 'ResBlock',
+        decoder_block_types: Union[str, Tuple[str]] = 'ResBlock',
+        encoder_block_out_channels: Tuple[int, ...] = (128, 256, 512, 512, 1024, 1024),
+        decoder_block_out_channels: Tuple[int, ...] = (128, 256, 512, 512, 1024, 1024),
+        encoder_layers_per_block: Tuple[int] = (2, 2, 2, 3, 3, 3),
+        decoder_layers_per_block: Tuple[int] = (3, 3, 3, 3, 3, 3),
+        encoder_qkv_multiscales: Tuple[Tuple[int, ...], ...] = ((), (), (), (5, ), (5, ), (5, )),
+        decoder_qkv_multiscales: Tuple[Tuple[int, ...], ...] = ((), (), (), (5, ), (5, ), (5, )),
+        upsample_block_type: str = 'pixel_shuffle',
+        downsample_block_type: str = 'pixel_unshuffle',
+        decoder_norm_types: Union[str, Tuple[str]] = 'rms_norm',
+        decoder_act_fns: Union[str, Tuple[str]] = 'silu',
+        scaling_factor: float = 1.0,
         irradiance_hidden_dim: int = 128,
-        **kwargs,
     ) -> None:
         """
         All DCAE args/kwargs are passed through to the base class.
@@ -727,7 +741,24 @@ class DCAEWithIrradiance(MyAutoencoderDC):
             irradiance_hidden_dim (`int`, defaults to 128):
                 Hidden dimension of the MLP head used to predict irradiance.
         """
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            in_channels=in_channels,
+            latent_channels=latent_channels,
+            attention_head_dim=attention_head_dim,
+            encoder_block_types=encoder_block_types,
+            decoder_block_types=decoder_block_types,
+            encoder_block_out_channels=encoder_block_out_channels,
+            decoder_block_out_channels=decoder_block_out_channels,
+            encoder_layers_per_block=encoder_layers_per_block,
+            decoder_layers_per_block=decoder_layers_per_block,
+            encoder_qkv_multiscales=encoder_qkv_multiscales,
+            decoder_qkv_multiscales=decoder_qkv_multiscales,
+            upsample_block_type=upsample_block_type,
+            downsample_block_type=downsample_block_type,
+            decoder_norm_types=decoder_norm_types,
+            decoder_act_fns=decoder_act_fns,
+            scaling_factor=scaling_factor,
+        )
 
         # Simple head: global average pool over spatial dims -> MLP -> scalar irradiance
         self.irradiance_head = nn.Sequential(
