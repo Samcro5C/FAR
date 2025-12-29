@@ -33,11 +33,11 @@ class CustomSequenceAdapter(Dataset):
         if isinstance(ctx, tuple):
             ctx_vid, ctx_irr = ctx[0], ctx[1]
         else:
-            ctx_vid, ctx_irr = ctx, torch.empty(size=ctx.shape[0])
+            ctx_vid, ctx_irr = ctx, torch.empty((ctx.shape[0],), dtype=torch.float32)
         if isinstance(tgt, tuple):
             tgt_vid, tgt_irr = tgt[0], tgt[1]
         else:
-            tgt_vid, tgt_irr = tgt, torch.empty(size=tgt.shape[0])
+            tgt_vid, tgt_irr = tgt, torch.empty((ctx.shape[0],), dtype=torch.float32)
         video = torch.cat([ctx_vid, tgt_vid], dim=0)  # (T, C, H, W)
         irr = torch.cat([ctx_irr, tgt_irr], dim=0)
         
