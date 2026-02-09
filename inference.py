@@ -182,6 +182,30 @@ def main():
                 "dtype": "float32",
             },
         )
+        
+        data_vars = {'asi_preds': da}
+
+        if hasattr(train_pipeline.vae, 'irradiance_head'):
+            N, S, T, C, H, W = latent_b.shape
+            pred_latents_flat = latent_b.reshape(N*S*T, C, H, W)
+            pred_latents_flat_scaled = pred_latents_flat / train_pipeline.vae.scale_factor
+            pred_irr = train_pipeline.vae.irradiance_head(pred_latents_flat_scaled.to(train_pipeline.vae.device))
+            pred_irr = pred_irr.reshape(N, S, T)
+            pred_irr_np = pred_irr.to(torch.float32).cpu().numpy()
+            da_irr = xr.DataArray(
+                pred_irr_np,
+                dims=("time", "sample", "lead_time"),
+                coords={
+                    "time": idx_b_np,
+                    "lead_time": sample_lead_times,
+                },
+                name="irr_preds",
+                attrs={
+                    "description": "FARSKY model irradiance predictions",
+                },
+            )
+            data_vars['irr_preds'] = da_irr
+
         chunk_sizes = {
             "time": 2,
             "sample": -1,
@@ -190,12 +214,13 @@ def main():
             "x": -1,
             "y": -1,
         }
-        da = da.chunk(chunk_sizes)
+        ds = xr.Dataset(data_vars=data_vars)
+        ds = ds.chunk(chunk_sizes)
         da_latents = da_latents.chunk(chunk_sizes)
         if zarr_path.exists():
-            da.to_zarr(zarr_path, mode="a", append_dim="time")
+            ds.to_zarr(zarr_path, mode="a", append_dim="time")
         else:
-            da.to_zarr(zarr_path, mode="w", encoding=encoding)
+            ds.to_zarr(zarr_path, mode="w", encoding=encoding)
         if zarr_path_latents.exists():
             da_latents.to_zarr(zarr_path_latents, mode="a", append_dim="time")
         else:
