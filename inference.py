@@ -188,7 +188,7 @@ def main():
         if hasattr(train_pipeline.vae, 'irradiance_head'):
             N, S, T, C, H, W = latent_b.shape
             pred_latents_flat = latent_b.reshape(N*S*T, C, H, W)
-            pred_latents_flat_scaled = pred_latents_flat / train_pipeline.vae.scale_factor
+            pred_latents_flat_scaled = 1 / train_pipeline.vae.config.scaling_factor * pred_latents_flat
             pred_irr = train_pipeline.vae.irradiance_head(pred_latents_flat_scaled.to(train_pipeline.vae.device))
             pred_irr = pred_irr.reshape(N, S, T)
             pred_irr_np = pred_irr.to(torch.float32).cpu().numpy()
