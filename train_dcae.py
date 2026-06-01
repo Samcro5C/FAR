@@ -48,6 +48,37 @@ def train(args):
     # load trainer pipeline
     train_pipeline = build_trainer(opt['train']['train_pipeline'])(**opt['models'], accelerator=accelerator)
 
+    # load pretrained weights (fine-tuning)
+    pretrained_weights = opt['path'].get('pretrained_weights')
+
+    if pretrained_weights is not None:
+        logger.info(f"Loading pretrained weights from {pretrained_weights}")
+
+        state_dict = torch.load(
+            pretrained_weights,
+            map_location='cpu',
+            weights_only=True,
+        )
+
+        model_state_dict = train_pipeline.model.state_dict()
+
+        # remove incompatible keys automatically
+        filtered_state_dict = {
+            k: v
+            for k, v in state_dict.items()
+            if k in model_state_dict
+            and v.shape == model_state_dict[k].shape
+        }
+
+        missing, unexpected = train_pipeline.model.load_state_dict(
+            filtered_state_dict,
+            strict=False,
+        )
+
+        logger.info(f"Loaded pretrained weights")
+        logger.info(f"Missing keys: {missing}")
+        logger.info(f"Unexpected keys: {unexpected}")
+
     # set optimizer
     train_opt = opt['train']
     optim_g_type, optim_d_type = train_opt['optim_g'].pop('type'), train_opt['optim_d'].pop('type')
